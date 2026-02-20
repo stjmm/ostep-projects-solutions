@@ -1,5 +1,10 @@
 # My solutions to OSTEP projects (stjmm)
 
+**Initial Projects**
+- [x] Unix Utilities
+- [] Sort (text-based)
+- [] Sort (binary)
+- [] Reverse
 
 # Projects for an Operating Systems Class
 
