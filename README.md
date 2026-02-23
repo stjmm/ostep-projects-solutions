@@ -5,5 +5,7 @@ This repo contains source code for completed and uncompleted [ostep-projects](ht
 
 - **Initial Projects**
     - [initial-utilities](./initial-utilities/): solutions in wcat.c, wgrep.c, wzip.c, wunzip.c
-    - [initial-reverse](./initial-reverse/): solution in reverse.c
-    - [initial-kv](./initial-kv/): using hash table
+    - [initial-reverse](./initial-reverse/reverse.c): solution in reverse.c
+    - [initial-kv](./initial-kv/kv.c): using hash table
+- **Processes Shell**
+    - [processes-shell](./processes-shell/wish.c)
