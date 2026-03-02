@@ -1,0 +1,133 @@
+diff '--color=auto' -u -b -B xv6-public/Makefile src/Makefile
+--- xv6-public/Makefile	2026-03-02 11:37:37.014597442 +0100
++++ src/Makefile	2026-03-02 11:31:22.526433545 +0100
+@@ -217,7 +217,7 @@
+ 	then echo "-gdb tcp::$(GDBPORT)"; \
+ 	else echo "-s -p $(GDBPORT)"; fi)
+ ifndef CPUS
+-CPUS := 2
++CPUS := 1
+ endif
+ QEMUOPTS = -drive file=fs.img,index=1,media=disk,format=raw -drive file=xv6.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
+ 
+diff '--color=auto' -u -b -B xv6-public/defs.h src/defs.h
+--- xv6-public/defs.h	2026-03-02 11:37:37.015597423 +0100
++++ src/defs.h	2026-03-02 10:27:24.770617966 +0100
+@@ -186,5 +186,7 @@
+ int             copyout(pde_t*, uint, void*, uint);
+ void            clearpteu(pde_t *pgdir, char *uva);
+ 
++void init_read_counter(void);
++
+ // number of elements in fixed-size array
+ #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+diff '--color=auto' -u -b -B xv6-public/main.c src/main.c
+--- xv6-public/main.c	2026-03-02 11:37:37.017597384 +0100
++++ src/main.c	2026-03-02 10:23:09.077517053 +0100
+@@ -32,6 +32,7 @@
+   fileinit();      // file table
+   ideinit();       // disk 
+   startothers();   // start other processors
++  init_read_counter(); // for our initial-xv6
+   kinit2(P2V(4*1024*1024), P2V(PHYSTOP)); // must come after startothers()
+   userinit();      // first user process
+   mpmain();        // finish this processor's setup
+diff '--color=auto' -u -b -B xv6-public/syscall.c src/syscall.c
+--- xv6-public/syscall.c	2026-03-02 11:37:37.019597345 +0100
++++ src/syscall.c	2026-03-02 09:49:15.341691526 +0100
+@@ -103,6 +103,7 @@
+ extern int sys_wait(void);
+ extern int sys_write(void);
+ extern int sys_uptime(void);
++extern int sys_getreadcount(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -126,6 +127,7 @@
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_getreadcount]  sys_getreadcount
+ };
+ 
+ void
+diff '--color=auto' -u -b -B xv6-public/syscall.h src/syscall.h
+--- xv6-public/syscall.h	2026-03-02 11:37:37.019597345 +0100
++++ src/syscall.h	2026-03-02 09:48:03.823750205 +0100
+@@ -20,3 +20,4 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_getreadcount 22
+diff '--color=auto' -u -b -B xv6-public/sysfile.c src/sysfile.c
+--- xv6-public/sysfile.c	2026-03-02 11:37:37.019597345 +0100
++++ src/sysfile.c	2026-03-02 10:23:54.822836193 +0100
+@@ -16,6 +16,20 @@
+ #include "file.h"
+ #include "fcntl.h"
+ 
++struct read_counter {
++  int count;
++  struct spinlock lock;
++};
++
++struct read_counter global_readcount;
++
++void
++init_read_counter()
++{
++    global_readcount.count = 0;
++    initlock(&global_readcount.lock, "readcount");
++}
++
+ // Fetch the nth word-sized system call argument as a file descriptor
+ // and return both the descriptor and the corresponding struct file.
+ static int
+@@ -73,6 +87,10 @@
+   int n;
+   char *p;
+ 
++  acquire(&global_readcount.lock);
++  global_readcount.count++;
++  release(&global_readcount.lock);
++
+   if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argptr(1, &p, n) < 0)
+     return -1;
+   return fileread(f, p, n);
+@@ -104,6 +122,17 @@
+ }
+ 
+ int
++sys_getreadcount(void)
++{
++  int rc;
++  acquire(&global_readcount.lock);
++  rc = global_readcount.count;
++  release(&global_readcount.lock);
++
++  return rc;
++}
++
++int
+ sys_fstat(void)
+ {
+   struct file *f;
+diff '--color=auto' -u -b -B xv6-public/user.h src/user.h
+--- xv6-public/user.h	2026-03-02 11:37:37.020597325 +0100
++++ src/user.h	2026-03-02 09:47:36.302149225 +0100
+@@ -23,6 +23,7 @@
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int getreadcount(void);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff '--color=auto' -u -b -B xv6-public/usys.S src/usys.S
+--- xv6-public/usys.S	2026-03-02 11:37:37.020597325 +0100
++++ src/usys.S	2026-03-02 09:15:03.609662187 +0100
+@@ -29,3 +29,4 @@
+ SYSCALL(sbrk)
+ SYSCALL(sleep)
+ SYSCALL(uptime)
++SYSCALL(getreadcount)
