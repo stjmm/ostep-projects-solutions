@@ -1,0 +1,167 @@
+diff '--color=auto' -u xv6-public/Makefile src/Makefile
+--- xv6-public/Makefile	2026-03-10 10:18:28.747677373 +0100
++++ src/Makefile	2026-03-10 10:10:43.858637784 +0100
+@@ -181,6 +181,8 @@
+ 	_usertests\
+ 	_wc\
+ 	_zombie\
++	_tracetest\
++
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+@@ -217,7 +219,7 @@
+ 	then echo "-gdb tcp::$(GDBPORT)"; \
+ 	else echo "-s -p $(GDBPORT)"; fi)
+ ifndef CPUS
+-CPUS := 2
++CPUS := 1
+ endif
+ QEMUOPTS = -drive file=fs.img,index=1,media=disk,format=raw -drive file=xv6.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
+ 
+@@ -250,7 +252,7 @@
+ EXTRA=\
+ 	mkfs.c ulib.c user.h cat.c echo.c forktest.c grep.c kill.c\
+ 	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c\
+-	printf.c umalloc.c\
++	printf.c umalloc.c tracetest.c\
+ 	README dot-bochsrc *.pl toc.* runoff runoff1 runoff.list\
+ 	.gdbinit.tmpl gdbutil\
+ 
+diff '--color=auto' -u xv6-public/main.c src/main.c
+--- xv6-public/main.c	2026-03-10 10:18:28.751677314 +0100
++++ src/main.c	2026-03-10 09:50:46.394322856 +0100
+@@ -11,6 +11,8 @@
+ extern pde_t *kpgdir;
+ extern char end[]; // first address after kernel loaded from ELF file
+ 
++extern struct spinlock trace;
++
+ // Bootstrap processor starts running C code here.
+ // Allocate a real stack and switch to it, first
+ // doing some setup required for memory allocator to work.
+@@ -35,6 +37,7 @@
+   kinit2(P2V(4*1024*1024), P2V(PHYSTOP)); // must come after startothers()
+   userinit();      // first user process
+   mpmain();        // finish this processor's setup
++  initlock(&trace, "trace");
+ }
+ 
+ // Other CPUs jump here from entryother.S.
+diff '--color=auto' -u xv6-public/syscall.c src/syscall.c
+--- xv6-public/syscall.c	2026-03-10 10:18:28.753677284 +0100
++++ src/syscall.c	2026-03-10 09:05:45.684535560 +0100
+@@ -103,6 +103,8 @@
+ extern int sys_wait(void);
+ extern int sys_write(void);
+ extern int sys_uptime(void);
++extern int sys_trace(void);
++extern int sys_getcount(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -126,6 +128,8 @@
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_trace]   sys_trace,
++[SYS_getcount] sys_getcount,
+ };
+ 
+ void
+diff '--color=auto' -u xv6-public/syscall.h src/syscall.h
+--- xv6-public/syscall.h	2026-03-10 10:18:28.753677284 +0100
++++ src/syscall.h	2026-03-10 09:03:34.547305455 +0100
+@@ -20,3 +20,5 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_trace  22
++#define SYS_getcount 23
+diff '--color=auto' -u xv6-public/sysfile.c src/sysfile.c
+--- xv6-public/sysfile.c	2026-03-10 10:18:28.753677284 +0100
++++ src/sysfile.c	2026-03-10 10:03:04.300702192 +0100
+@@ -282,6 +282,11 @@
+   return ip;
+ }
+ 
++static struct spinlock trace_lock;
++static char trace_pathname[256];
++static int trace_enabled;
++static int trace_count;
++
+ int
+ sys_open(void)
+ {
+@@ -295,6 +300,12 @@
+ 
+   begin_op();
+ 
++  acquire(&trace_lock);
++  if (trace_enabled && strncmp(path, trace_pathname, 256) == 0) {
++    trace_count++;
++  }
++  release(&trace_lock);
++
+   if(omode & O_CREATE){
+     ip = create(path, T_FILE, 0, 0);
+     if(ip == 0){
+@@ -333,6 +344,36 @@
+ }
+ 
+ int
++sys_trace(void)
++{
++  char *path;
++  if (argstr(0, &path) < 0)
++    return -1;
++
++  acquire(&trace_lock);
++
++  safestrcpy(trace_pathname, path, 256);
++  trace_enabled = 1;
++  trace_count = 0;
++    
++  release(&trace_lock);
++
++  return 0;
++}
++
++int
++sys_getcount(void)
++{
++  int c;
++
++  acquire(&trace_lock);
++  c = trace_count;
++  release(&trace_lock);
++
++  return c;
++}
++
++int
+ sys_mkdir(void)
+ {
+   char *path;
+Only in src: tracetest.c
+diff '--color=auto' -u xv6-public/user.h src/user.h
+--- xv6-public/user.h	2026-03-10 10:18:28.754677269 +0100
++++ src/user.h	2026-03-10 10:15:19.122479330 +0100
+@@ -23,6 +23,8 @@
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int trace(const char *pathname);
++int getcount(void);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff '--color=auto' -u xv6-public/usys.S src/usys.S
+--- xv6-public/usys.S	2026-03-10 10:18:28.754677269 +0100
++++ src/usys.S	2026-03-10 09:01:31.170579821 +0100
+@@ -29,3 +29,5 @@
+ SYSCALL(sbrk)
+ SYSCALL(sleep)
+ SYSCALL(uptime)
++SYSCALL(trace)
++SYSCALL(getcount)
