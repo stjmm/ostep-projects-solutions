@@ -1,0 +1,305 @@
+diff '--color=auto' -ru xv6-public/Makefile src/Makefile
+--- xv6-public/Makefile	2026-03-17 16:56:05.217005999 +0100
++++ src/Makefile	2026-03-17 16:45:46.949232951 +0100
+@@ -181,6 +181,7 @@
+ 	_usertests\
+ 	_wc\
+ 	_zombie\
++	_ps\
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+@@ -217,7 +218,7 @@
+ 	then echo "-gdb tcp::$(GDBPORT)"; \
+ 	else echo "-s -p $(GDBPORT)"; fi)
+ ifndef CPUS
+-CPUS := 2
++CPUS := 1
+ endif
+ QEMUOPTS = -drive file=fs.img,index=1,media=disk,format=raw -drive file=xv6.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
+ 
+@@ -250,7 +251,7 @@
+ EXTRA=\
+ 	mkfs.c ulib.c user.h cat.c echo.c forktest.c grep.c kill.c\
+ 	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c\
+-	printf.c umalloc.c\
++	printf.c umalloc.c ps.c\
+ 	README dot-bochsrc *.pl toc.* runoff runoff1 runoff.list\
+ 	.gdbinit.tmpl gdbutil\
+ 
+diff '--color=auto' -ru xv6-public/defs.h src/defs.h
+--- xv6-public/defs.h	2026-03-17 16:56:05.217005999 +0100
++++ src/defs.h	2026-03-17 15:53:52.881000783 +0100
+@@ -8,6 +8,7 @@
+ struct spinlock;
+ struct sleeplock;
+ struct stat;
++struct pstat;
+ struct superblock;
+ 
+ // bio.c
+@@ -120,6 +121,8 @@
+ int             wait(void);
+ void            wakeup(void*);
+ void            yield(void);
++int             settickets(int);
++int             getpinfo(struct pstat *);
+ 
+ // swtch.S
+ void            swtch(struct context**, struct context*);
+diff '--color=auto' -ru xv6-public/proc.c src/proc.c
+--- xv6-public/proc.c	2026-03-17 16:56:05.219005970 +0100
++++ src/proc.c	2026-03-17 16:51:43.712895395 +0100
+@@ -6,6 +6,7 @@
+ #include "x86.h"
+ #include "proc.h"
+ #include "spinlock.h"
++#include "pstat.h"
+ 
+ struct {
+   struct spinlock lock;
+@@ -89,6 +90,9 @@
+   p->state = EMBRYO;
+   p->pid = nextpid++;
+ 
++  // initial tickets is 1
++  p->tickets = 1;
++
+   release(&ptable.lock);
+ 
+   // Allocate kernel stack.
+@@ -200,6 +204,9 @@
+   np->parent = curproc;
+   *np->tf = *curproc->tf;
+ 
++  // child process inherits parent tickets
++  np->tickets = curproc->tickets;
++
+   // Clear %eax so that fork returns 0 in the child.
+   np->tf->eax = 0;
+ 
+@@ -311,6 +318,15 @@
+   }
+ }
+ 
++uint rand_next = 1;
++
++uint
++rand(void)
++{
++  rand_next = rand_next * 1664525 + 1013904223;
++  return rand_next;
++}
++
+ //PAGEBREAK: 42
+ // Per-CPU process scheduler.
+ // Each CPU calls scheduler() after setting itself up.
+@@ -327,31 +343,39 @@
+   c->proc = 0;
+   
+   for(;;){
+-    // Enable interrupts on this processor.
+     sti();
+-
+-    // Loop over process table looking for process to run.
+     acquire(&ptable.lock);
+-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+-      if(p->state != RUNNABLE)
+-        continue;
+ 
+-      // Switch to chosen process.  It is the process's job
+-      // to release ptable.lock and then reacquire it
+-      // before jumping back to us.
+-      c->proc = p;
+-      switchuvm(p);
+-      p->state = RUNNING;
+-
+-      swtch(&(c->scheduler), p->context);
+-      switchkvm();
+-
+-      // Process is done running for now.
+-      // It should have changed its p->state before coming back.
+-      c->proc = 0;
++    int total_tickets = 0;
++    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++)
++      if (p->state == RUNNABLE)
++        total_tickets += p->tickets;
++    
++
++    if (total_tickets > 0) {
++      int winner = (rand() % total_tickets) + 1;
++
++      int counter = 0;
++      for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
++        if (p->state != RUNNABLE)
++          continue;
++        counter += p->tickets;
++        if (counter >= winner)
++          break;
++      }
++
++      if (p != &ptable.proc[NPROC] && p->state == RUNNABLE) {
++        c->proc = p;
++        switchuvm(p);
++        p->state = RUNNING;
++        p->ticks++;
++        swtch(&(c->scheduler), p->context);
++        switchkvm();
++        c->proc = 0;
++      }
+     }
+-    release(&ptable.lock);
+ 
++    release(&ptable.lock);
+   }
+ }
+ 
+@@ -532,3 +556,36 @@
+     cprintf("\n");
+   }
+ }
++
++int
++settickets(int number)
++{
++  struct proc *cur = myproc();
++
++  acquire(&ptable.lock);
++  for (struct proc *p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
++    if (cur->pid == p->pid) {
++      p->tickets = number;
++      release(&ptable.lock);
++      return 0;
++    }
++  }
++  release(&ptable.lock);
++
++  return -1;
++}
++
++int
++getpinfo(struct pstat *p)
++{
++  acquire(&ptable.lock);
++  for (int i = 0; i < NPROC; i++) {
++    p->inuse[i] = ptable.proc[i].state == UNUSED ? 0 : 1;
++    p->tickets[i] = ptable.proc[i].tickets;
++    p->pid[i] = ptable.proc[i].pid;
++    p->ticks[i] = ptable.proc[i].ticks;
++  }
++  release(&ptable.lock);
++
++  return 0;
++}
+diff '--color=auto' -ru xv6-public/proc.h src/proc.h
+--- xv6-public/proc.h	2026-03-17 16:56:05.219005970 +0100
++++ src/proc.h	2026-03-17 15:27:22.386249707 +0100
+@@ -49,6 +49,8 @@
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++  int tickets;                 // Number of tickets
++  int ticks;                   // Accumulated tickets
+ };
+ 
+ // Process memory is laid out contiguously, low addresses first:
+Only in src: ps.c
+Only in src: pstat.h
+diff '--color=auto' -ru xv6-public/syscall.c src/syscall.c
+--- xv6-public/syscall.c	2026-03-17 16:56:05.220005955 +0100
++++ src/syscall.c	2026-03-17 13:04:51.924068233 +0100
+@@ -103,6 +103,8 @@
+ extern int sys_wait(void);
+ extern int sys_write(void);
+ extern int sys_uptime(void);
++extern int sys_settickets(void);
++extern int sys_getpinfo(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -126,6 +128,8 @@
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_settickets] sys_settickets,
++[SYS_getpinfo] sys_getpinfo
+ };
+ 
+ void
+diff '--color=auto' -ru xv6-public/syscall.h src/syscall.h
+--- xv6-public/syscall.h	2026-03-17 16:56:05.220005955 +0100
++++ src/syscall.h	2026-03-17 15:49:43.664557040 +0100
+@@ -20,3 +20,5 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_settickets 22
++#define SYS_getpinfo 23
+diff '--color=auto' -ru xv6-public/sysproc.c src/sysproc.c
+--- xv6-public/sysproc.c	2026-03-17 16:56:05.220005955 +0100
++++ src/sysproc.c	2026-03-17 13:26:29.107800122 +0100
+@@ -6,6 +6,7 @@
+ #include "memlayout.h"
+ #include "mmu.h"
+ #include "proc.h"
++#include "pstat.h"
+ 
+ int
+ sys_fork(void)
+@@ -89,3 +90,28 @@
+   release(&tickslock);
+   return xticks;
+ }
++
++int
++sys_settickets(void)
++{
++  int n;
++
++  if(argint(0, &n) < 0)
++    return -1;
++
++  if (n < 1) {
++      return -1;
++  }
++  return settickets(n);
++}
++
++int
++sys_getpinfo(void)
++{
++  struct pstat *p;
++
++  if (argptr(0, (void*)&p, sizeof(struct pstat)) < 0)
++    return -1;
++
++  return getpinfo(p);
++}
+diff '--color=auto' -ru xv6-public/user.h src/user.h
+--- xv6-public/user.h	2026-03-17 16:56:05.221005940 +0100
++++ src/user.h	2026-03-17 15:53:46.357097217 +0100
+@@ -1,5 +1,6 @@
+ struct stat;
+ struct rtcdate;
++struct pstat;
+ 
+ // system calls
+ int fork(void);
+@@ -23,6 +24,8 @@
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int settickets(int);
++int getpinfo(struct pstat *);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff '--color=auto' -ru xv6-public/usys.S src/usys.S
+--- xv6-public/usys.S	2026-03-17 16:56:05.221005940 +0100
++++ src/usys.S	2026-03-17 12:55:51.828686108 +0100
+@@ -29,3 +29,5 @@
+ SYSCALL(sbrk)
+ SYSCALL(sleep)
+ SYSCALL(uptime)
++SYSCALL(settickets)
++SYSCALL(getpinfo)
