@@ -1,0 +1,229 @@
+Common subdirectories: xv6-public/.git and src2/.git
+diff '--color=auto' -uN xv6-public/Makefile src2/Makefile
+--- xv6-public/Makefile	2026-04-08 11:00:24.345776300 +0200
++++ src2/Makefile	2026-04-10 10:17:42.900722095 +0200
+@@ -181,6 +181,7 @@
+ 	_usertests\
+ 	_wc\
+ 	_zombie\
++	_test_readonly\
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+@@ -217,7 +218,7 @@
+ 	then echo "-gdb tcp::$(GDBPORT)"; \
+ 	else echo "-s -p $(GDBPORT)"; fi)
+ ifndef CPUS
+-CPUS := 2
++CPUS := 1
+ endif
+ QEMUOPTS = -drive file=fs.img,index=1,media=disk,format=raw -drive file=xv6.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
+ 
+@@ -250,7 +251,7 @@
+ EXTRA=\
+ 	mkfs.c ulib.c user.h cat.c echo.c forktest.c grep.c kill.c\
+ 	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c\
+-	printf.c umalloc.c\
++	printf.c umalloc.c test_readonly.c\
+ 	README dot-bochsrc *.pl toc.* runoff runoff1 runoff.list\
+ 	.gdbinit.tmpl gdbutil\
+ 
+diff '--color=auto' -uN xv6-public/defs.h src2/defs.h
+--- xv6-public/defs.h	2026-04-08 11:00:24.346776284 +0200
++++ src2/defs.h	2026-04-10 10:14:43.134223516 +0200
+@@ -185,6 +185,8 @@
+ void            switchkvm(void);
+ int             copyout(pde_t*, uint, void*, uint);
+ void            clearpteu(pde_t *pgdir, char *uva);
++int             mprotect(void *, int);
++int             munprotect(void *, int);
+ 
+ // number of elements in fixed-size array
+ #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+diff '--color=auto' -uN xv6-public/syscall.c src2/syscall.c
+--- xv6-public/syscall.c	2026-04-08 11:00:24.351776204 +0200
++++ src2/syscall.c	2026-04-10 09:33:40.768914669 +0200
+@@ -103,6 +103,8 @@
+ extern int sys_wait(void);
+ extern int sys_write(void);
+ extern int sys_uptime(void);
++extern int sys_mprotect(void);
++extern int sys_munprotect(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -126,6 +128,8 @@
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_mprotect] sys_mprotect,
++[SYS_munprotect] sys_munprotect,
+ };
+ 
+ void
+diff '--color=auto' -uN xv6-public/syscall.h src2/syscall.h
+--- xv6-public/syscall.h	2026-04-10 09:35:13.432780829 +0200
++++ src2/syscall.h	2026-04-10 09:34:32.300284128 +0200
+@@ -20,3 +20,5 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_mprotect 22
++#define SYS_munprotect 23
+diff '--color=auto' -uN xv6-public/sysproc.c src2/sysproc.c
+--- xv6-public/sysproc.c	2026-04-08 11:00:24.351776204 +0200
++++ src2/sysproc.c	2026-04-10 09:49:57.417835078 +0200
+@@ -89,3 +89,31 @@
+   release(&tickslock);
+   return xticks;
+ }
++
++int
++sys_mprotect(void)
++{
++  void *addr;
++  int len;
++
++  if (argptr(0, (char **)&addr, sizeof(void *)) || argint(1, &len) < 0)
++    return -1;
++  if ((uint)addr % PGSIZE != 0 || len <= 0 || (uint)addr < PGSIZE)
++    return -1;
++  
++  return mprotect(addr, len);
++}
++
++int
++sys_munprotect(void)
++{
++  void *addr;
++  int len;
++
++  if (argptr(0, (char **)&addr, sizeof(void *)) < 0 || argint(1, &len) < 0)
++    return -1;
++  if ((uint)addr % PGSIZE != 0 || len <= 0 || (uint)addr < PGSIZE)
++    return -1;
++  
++  return munprotect(addr, len);
++}
+diff '--color=auto' -uN xv6-public/test_readonly.c src2/test_readonly.c
+--- xv6-public/test_readonly.c	1970-01-01 01:00:00.000000000 +0100
++++ src2/test_readonly.c	2026-04-10 10:21:29.620595857 +0200
+@@ -0,0 +1,45 @@
++#include "types.h"
++#include "user.h"
++
++#define PGSIZE 4096
++
++int main(void) {
++  // 1. Setup aligned memory
++  char *mem = sbrk(PGSIZE * 2);
++  char *p = (char *)((((uint)mem) + PGSIZE - 1) & ~(PGSIZE - 1));
++  
++  *p = 'A'; // Initial write should work fine
++
++  // 2. Protect in the Parent
++  if (mprotect(p, 1) < 0) {
++    printf(1, "mprotect failed\n");
++    exit();
++  }
++  printf(1, "Parent: Protected page at %p\n", p);
++
++  // 3. Fork
++  int pid = fork();
++
++  if (pid < 0) {
++    printf(1, "fork failed\n");
++    exit();
++  }
++
++  if (pid == 0) {
++    // CHILD PROCESS
++    printf(1, "Child: Inherited page. Attempting write (Should trap)...\n");
++    *p = 'B'; 
++    printf(1, "FAIL: Child survived writing to protected page!\n");
++    exit();
++  } else {
++    // PARENT PROCESS
++    wait(); // Wait for child to get killed
++    printf(1, "Parent: Child process finished (likely killed by trap).\n");
++    
++    printf(1, "Parent: Attempting write to own page (Should also trap)...\n");
++    *p = 'C';
++    printf(1, "FAIL: Parent survived writing to protected page!\n");
++  }
++
++  exit();
++}
+diff '--color=auto' -uN xv6-public/user.h src2/user.h
+--- xv6-public/user.h	2026-04-08 11:00:24.352776188 +0200
++++ src2/user.h	2026-04-10 10:15:05.229914084 +0200
+@@ -23,6 +23,8 @@
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int mprotect(void *, int);
++int munprotect(void *, int);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff '--color=auto' -uN xv6-public/usys.S src2/usys.S
+--- xv6-public/usys.S	2026-04-10 09:35:22.957664282 +0200
++++ src2/usys.S	2026-04-10 09:34:58.351965359 +0200
+@@ -29,3 +29,5 @@
+ SYSCALL(sbrk)
+ SYSCALL(sleep)
+ SYSCALL(uptime)
++SYSCALL(mprotect)
++SYSCALL(munprotect)
+diff '--color=auto' -uN xv6-public/vm.c src2/vm.c
+--- xv6-public/vm.c	2026-04-08 11:00:24.352776188 +0200
++++ src2/vm.c	2026-04-10 10:12:56.653714687 +0200
+@@ -385,6 +385,48 @@
+   return 0;
+ }
+ 
++int
++mprotect(void *addr, int len)
++{
++  struct proc *curproc = myproc();
++  if ((uint)addr + len * PGSIZE > curproc->sz)
++    return -1;
++
++  pte_t *pte;
++  for (uint a = (uint)addr; a < (uint)addr + len * PGSIZE; a += PGSIZE) {
++      pte = walkpgdir(curproc->pgdir, (char*)a, 0);
++      if (!pte || !(*pte & PTE_P))
++        return -1;
++
++      *pte &= ~PTE_W;
++  }
++  
++  lcr3(V2P(curproc->pgdir));
++
++  return 0;
++}
++
++int
++munprotect(void *addr, int len)
++{
++  struct proc *curproc = myproc();
++  if ((uint)addr + len * PGSIZE > curproc->sz)
++    return -1;
++
++  pte_t *pte;
++  for (uint a = (uint)addr; a < (uint)addr + len * PGSIZE; a += PGSIZE) {
++      pte = walkpgdir(curproc->pgdir, (char*)a, 0);
++      if (!pte || !(*pte & PTE_P))
++        return -1;
++
++      *pte |= PTE_W;
++  }
++  
++  lcr3(V2P(curproc->pgdir));
++
++  return 0;
++}
++
+ //PAGEBREAK!
+ // Blank page.
+ //PAGEBREAK!

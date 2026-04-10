@@ -32,4 +32,5 @@ patch -p1 < ../patch.patch
 - **xv6 projects**
     - [initial-xv6](./initial-xv6/getreadcount.patch)
     - [initial-xv6-tracer](./initial-xv6-tracer/trace.patch)
-
+    - [scheduling-xv6-lottery](./scheduling-xv6-lottery/lottery.diff)
+    - [vm-xv6-intro](./vm-xv6-intro/)
