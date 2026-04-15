@@ -9,6 +9,8 @@ This repo contains source code for completed and uncompleted (must pass all test
     - [initial-kv](./initial-kv/kv.c): using hash table
 - **Processes Shell**
     - [processes-shell](./processes-shell/wish.c)
+- **Concurrency Projects**
+    - [concurrent-pzip](./concurrency-pzip/pzip.c)
 
 
 ## xv6 Projects
